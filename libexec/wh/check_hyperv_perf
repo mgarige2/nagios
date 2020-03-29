@@ -1,0 +1,193 @@
+#!/usr/bin/perl
+#
+#use warnings;
+#
+# File    : check_hyperv_perf
+# Version : 0.1
+# Date    : 2/8/13
+# Author  : Nathan Lewis <natewlew@gmail.com>
+# Summary : Plugin to Show Hyper-V Performance
+# Licence : GPL http://www.gnu.org/licenses/gpl.txt
+#
+# Install:
+#
+# * Copy this file to your plugins directory
+# * Modify $check_nt_path and use lib if necessary
+# * Copy check_hyperv_perf.php to your pnp4nagios template directory (optional).
+#   This makes your graphs look better.
+# * Use the check_hyperv_perf_example.cfg as a starting point for your
+#   nagios config. Take note that you need a host variable called _vm_list. 
+#   This is a comma seperated list of you guest vm names. I am pretty sure
+#   this is case sensitive.
+#
+
+my $check_nt_path = "/usr/local/nagios/libexec";
+
+use lib "/usr/local/nagios/libexec";
+use utils qw(%ERRORS $TIMEOUT);
+
+use strict;
+
+sub is_integer {
+   defined $_[0] && $_[0] =~ /^[+-]?\d+$/;
+}
+
+sub clean {
+
+    my $text = shift;
+
+    $text =~ s/\n//g;
+    $text =~ s/\r//g;
+
+    return $text;
+}
+
+my $usage = '
+Used to Get Hyperv Performance Data.
+
+Usage: ${0} hostname option vm\'s
+
+Options:
+
+    guestcount       Get the number of Healthy and Un-Heathy Guests
+    guestcpu         Get Performace data for the Guest CPU\'s (Requires VM List)
+    guestnetwork     Get the Guest Network Performance (Requires VM List)
+    overallcpu       Get the Host CPU Performance
+    gueststorage     Get the Guest Storage Performance (Requires VM List)
+    
+    
+VM list is a comma seperated list of VM\'s. This name are case sensitive.
+
+';
+
+my @perf;
+my @returnPerf;
+my @columns;
+my @vmsplit;
+my @returnPerfDisp;
+my $result;
+my $i = 0;
+my $error = 0;
+
+my $pass = $ARGV[1];
+my $host = $ARGV[0];
+my $option = $ARGV[1];
+my $vms = $ARGV[2];
+
+my $perf_cmd="$check_nt_path/check_nt -H $host -p 12489 -v COUNTER -l ";
+
+if($option eq "") {
+    print "Must supply an Option \n";
+    print "$usage \n";
+    exit $ERRORS{'UNKNOWN'};
+}
+
+if($host eq "") {
+    print "Must supply hostname \n";
+    print "$usage \n";
+    exit $ERRORS{'UNKNOWN'};
+}
+
+if($option eq "guestcount") {
+    @perf[0] = '"\\\\Hyper-V Virtual Machine Health Summary\\\\Health OK","Healthy VMs",VMs';
+    @perf[1] = '"\\\\Hyper-V Virtual Machine Health Summary\\\\Health Critical","Un-Healthy VMs",VMs -c 1';
+    
+} elsif($option eq "guestcpu") {
+
+    $i = 0;
+    
+    if($vms eq "") {
+        print "Must supply vm's \n";
+        print "$usage \n";
+        exit $ERRORS{'UNKNOWN'};
+    }
+
+    @vmsplit = split(/,/, $vms);
+    
+    foreach(@vmsplit) {
+        @perf[$i] = '"\\\\Hyper-V Hypervisor Virtual Processor(' . $_ . '*)\\\\% Guest Run Time","' . $_ . ' Virtual Run Time CPU" -w 80 -c 95';
+        $i++;
+        @perf[$i] = '"\\\\Hyper-V Hypervisor Virtual Processor(' . $_ . '*)\\\\% Hypervisor Run Time","' . $_ . ' Hypervisor Run Time CPU" -w 80 -c 95';
+        $i++;
+    }
+    
+} elsif($option eq "guestnetwork") {
+
+    $i = 0;
+    
+    if($vms eq "") {
+        print "Must supply vm's \n";
+        print "$usage \n";
+        exit $ERRORS{'UNKNOWN'};
+    }
+
+    @vmsplit = split(/,/, $vms);
+    
+    foreach(@vmsplit) {
+        @perf[$i] = '"\\\\Hyper-V Virtual Network Adapter(' . $_ . '*)\\\\Bytes Sent/sec","' . $_ . ' Bytes Sent Per Sec",b/s';
+        $i++;
+        @perf[$i] = '"\\\\Hyper-V Virtual Network Adapter(' . $_ . '*)\\\\Bytes Received/sec","' . $_ . ' Bytes Received Per Sec",b/s';
+        $i++;
+    }
+    
+} elsif($option eq "overallcpu") {
+    
+    @perf[0] = '"\\\\Hyper-V Hypervisor Logical Processor(_Total)\\\\% Guest Run Time","Logical Guest Run Time" -w 80 -c 95';
+    @perf[1] = '"\\\\Hyper-V Hypervisor Logical Processor(_Total)\\\\% Hypervisor Run Time","Logical Hypervisor Run Time" -w 80 -c 95';
+    
+    @perf[2] = '"\\\\Hyper-V Hypervisor Root Virtual Processor(_Total)\\\\% Guest Run Time","Root Virtual Guest Run Time" -w 80 -c 95';
+    @perf[3] = '"\\\\Hyper-V Hypervisor Root Virtual Processor(_Total)\\\\% Hypervisor Run Time","Root Virtual Hypervisor Run Time" -w 80 -c 95';
+ 
+} elsif($option eq "gueststorage") {
+    
+    $i = 0;
+    
+    if($vms eq "") {
+        print "Must supply vm's \n";
+        print "$usage \n";
+        exit $ERRORS{'UNKNOWN'};
+    }
+
+    @vmsplit = split(/,/, $vms);
+    
+    foreach(@vmsplit) {
+        @perf[$i] = '"\\\\Hyper-V Virtual Storage Device(*' . $_ . '*)\\\\Write Bytes/sec","' . $_ . ' Storage Write Bytes Per Sec",b/s';
+        $i++;
+        @perf[$i] = '"\\\\Hyper-V Virtual Storage Device(*' . $_ . '*)\\\\Read Bytes/sec","' . $_ . ' Storage Read Bytes Per Sec",b/s';
+        $i++;
+    }
+      
+} else {
+    print "Invalid Option";
+    exit $ERRORS{'CRITICAL'};
+}
+
+$i = 0;
+
+foreach (@perf) {
+    
+ 	$result = `$perf_cmd $_`;
+ 	
+ 	@columns = split(/\|/, $result);
+ 	
+ 	@returnPerfDisp[$i] = $columns[0];
+ 	@returnPerf[$i] = $columns[1];
+ 	
+ 	$i++;
+ } 
+ 
+ foreach (@returnPerfDisp) {
+    print "$_ \n";
+ }
+ 
+ print "|";
+ 
+ foreach (@returnPerf) {
+    print "$_";
+ }
+ 
+ exit $ERRORS{'OK'};
+ 
+ 
+ 
+ 

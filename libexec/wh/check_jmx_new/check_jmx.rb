@@ -1,0 +1,93 @@
+#!/usr/bin/env ruby
+require 'pry'
+require 'curb'
+#require 'awesome_print'
+require 'json'
+require 'optparse'
+optHash = Hash.new
+ERROR = 1
+WARN = 2
+UNKNOWN = 3
+OptionParser.new do |o|
+  helpmsg = "\n"
+  o.on('-m', '--min-error MIN-ERROR', 'minimum threshold for error') { |opt| optHash['error-min'] = opt }
+  o.on('-M', '--max-error MAX-ERROR', 'maximum threshold for error') { |opt| optHash['error-max'] = opt }
+  o.on('-w', '--min-warn MIN-WARNING', 'minimum threshold for warning') { |opt| optHash['warn-min'] = opt }
+  o.on('-W', '--max-warn MAX-WARNING', 'maximum threshold for warning') { |opt| optHash['warn-max'] = opt }
+  o.on('-u', '--url URL', 'jolokia read url to hit. Must return an integer!') { |opt| optHash['url'] = opt }
+  o.on('-f', '--host HOST', 'hostname running jolokia') { |opt| optHash['host'] = opt }
+  o.on('-p', '--port PORT', 'port to connect to jolokia') { |opt| optHash['port'] = opt }
+  o.on('-h', '--help', 'Returns this help message.') {
+    puts helpmsg
+    puts o; exit ERROR
+  }
+  begin #rescue to prevent nasty exception on bad arguements
+    o.parse!
+  rescue OptionParser::InvalidOption  => e
+    puts e
+    puts helpmsg
+    puts o; exit ERROR
+  end
+end
+['host','port','url'].each do |opt|
+  unless optHash.has_key? opt
+    puts "ERROR: Required option #{opt} not passed.  Use -h to get help."
+    exit ERROR
+  end
+end
+url = "http://#{optHash['host']}:#{optHash['port']}/jolokia/read/#{optHash['url']}"
+
+begin
+  http = Curl.get(url)
+rescue Curl::Err::HostResolutionError => e
+  puts "ERROR: Failed to resolve host"
+  exit ERROR
+rescue Exception => e
+  puts "ERROR: failed to acquire data : #{e.message}"
+end
+queue_data = Hash.new
+begin
+  json_data = JSON.parse(http.body_str)
+rescue Exception => e
+  puts "ERROR: Error parsing returned json. #{e.message}"
+  exit ERROR
+end
+if json_data.has_key? 'error_type'
+  puts "ERROR: #{json_data['error_type']}"
+  exit ERROR
+end
+if json_data['value'].class == Fixnum
+  value = json_data['value']
+else
+  value = json_data['value'].flatten[1].flatten[1]
+end
+unless value.class == Fixnum
+  puts "ERROR: #{value.class} returned as value for #{optHash['attribute']}"
+  exit ERROR
+end
+if optHash.has_key? 'error-min'
+  if optHash['error-min'].to_i > value
+    puts "ERROR: #{optHash['url']} of #{value} is less than minimum threshold of #{optHash['error-min']}|attribute=#{value.round}"
+    exit ERROR
+  end
+end
+if optHash.has_key? 'error-max'
+  if optHash['error-max'].to_i < value
+    puts "ERROR: #{optHash['url']} of #{value} is greater than maximum threshold of #{optHash['error-max']}|attribute=#{value.round}"
+    exit ERROR
+  end
+end
+if optHash.has_key? 'warn-min'
+  if optHash['warn-min'].to_i > value
+    puts "WARN: #{optHash['url']} of #{value} is less than minimum threshold of #{optHash['warn-min']}|attribute=#{value.round}"
+    exit WARN
+  end
+end
+if optHash.has_key? 'warn-max'
+  if optHash['warn-max'].to_i < value
+    puts "WARN: #{optHash['url']} of #{value} is greater than maximum threshold of #{optHash['warn-max']}|attribute=#{value.round}"
+    exit WARN
+  end
+end
+puts "OK: #{optHash['url']} of #{value} is great.|attribute=#{value.round}"
+exit 0

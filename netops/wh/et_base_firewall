@@ -1,0 +1,80 @@
+###############################################################################
+# et_base_switch.CFG - CONFIG FILE FOR SWITCH SERVICES
+###############################################################################
+
+###############################################################################
+###############################################################################
+#
+# SERVICE DEFINITIONS
+#
+###############################################################################
+###############################################################################
+
+# Create a service to PING to switch
+
+define service{
+	use			prod-network-service,srv-pnp 	; Inherit values from a template
+	hostgroup_name		firewalls       ; Hostgroupname
+	service_description	PING		; The service description
+	check_command		check_ping!400.0,35%!650.0,70%	; The command used to monitor the service
+        process_perf_data       1 
+	check_interval		5
+	}
+
+define service{
+        use                     prod-network-service         ; Name of service template to use
+        hostgroup_name          firewalls
+        service_description     SSH
+        check_command           check_ssh
+        }
+
+define service{
+        use                     prod-network-service,srv-pnp ; Inherit values from a template
+        hostgroup_name          firewalls        ; Hostgroupname
+        service_description     CPU Usage Node 0            ; The service description
+        check_command           et_check_snmp!1.3.6.1.4.1.2636.3.1.13.1.8.9.1.0.0!:85!:90!"CPU Usage"!"%"!1  ; The command used to monitor the service
+        max_check_attempts      6                       ; Re-check the service up to 3 times in order to determine its final (hard) state
+	process_perf_data       1
+        notification_options	c,r
+	_graphiteprefix		monitoring.wh.network
+	}
+
+define service{
+        use                     prod-network-service,srv-pnp ; Inherit values from a template
+        hostgroup_name          firewalls        ; Hostgroupname
+        service_description     CPU Usage Node 1            ; The service description
+        check_command           et_check_snmp!1.3.6.1.4.1.2636.3.1.13.1.8.9.2.0.0!:85!:90!"CPU Usage"!"%"!1  ; The command used to monitor the service
+        max_check_attempts      6
+	process_perf_data       1
+	notification_options	c,r
+	_graphiteprefix		monitoring.wh.network
+	}
+
+define service{
+        use                     prod-network-service,srv-pnp ; Inherit values from a template
+        hostgroup_name          firewalls        ; Hostgroupname
+        service_description     Memory Usage Node 0            ; The service description
+        check_command           et_check_snmp!1.3.6.1.4.1.2636.3.1.13.1.11.9.1.0.0!:85!:95!"Memory Usage"!"%"!1  ; The command used to monitor the service
+        process_perf_data       1
+	_graphiteprefix		monitoring.wh.network
+	}
+
+define service{
+        use                     prod-network-service,srv-pnp ; Inherit values from a template
+        hostgroup_name          firewalls        ; Hostgroupname
+        service_description     Memory Usage Node 1            ; The service description
+        check_command           et_check_snmp!1.3.6.1.4.1.2636.3.1.13.1.11.9.2.0.0!:85!:95!"Memory Usage"!"%"!1  ; The command used to monitor the service
+        process_perf_data       1
+	_graphiteprefix		monitoring.wh.network
+	}
+
+
+define service{
+	use			prod-network-service,srv-pnp
+	hostgroup_name		firewalls
+	#host_name		!cfw01.alv
+	service_description	Disk Usage
+	check_command		no-check_snmp_storage_usage!92!95!'(devfs|/dev/)'
+	process_perf_data	1
+	_graphiteprefix		monitoring.wh.network
+	}

@@ -1,0 +1,144 @@
+##### define Enterprise Technology EqualLogic checks
+
+###############################################################################
+###############################################################################
+#
+# Service DEFINITIONS
+#
+###############################################################################
+###############################################################################
+
+# Check Equallogic Informations
+define service{
+use prod-generic-service
+hostgroup_name wh-equallogic
+host_name !eqmember1-SATA,!eqmember2-SAS
+service_description General Information
+check_command check_equallogic!public!info
+}
+
+# Check Equallogic Health
+define service{
+use prod-generic-service
+hostgroup_name wh-equallogic
+host_name !eqmember1-SATA,!eqmember2-SAS
+service_description General Health
+check_command check_equallogic!public!health
+}
+
+# Check Equallogic Uptime
+define service{
+use prod-generic-service
+hostgroup_name wh-equallogic
+host_name !eqmember1-SATA,!eqmember2-SAS
+service_description Uptime
+check_command check_equallogic!public!uptime
+}
+
+# Check Equallogic Disk Status
+define service{
+use prod-generic-service
+hostgroup_name wh-equallogic
+host_name !eqmember1-SATA,!eqmember2-SAS
+service_description Disk Status
+check_command check_equallogic!public!disk
+}
+
+# Check Equallogic Disk (Raid) Usage
+define service{
+use prod-generic-service,srv-pnp
+hostgroup_name wh-equallogic
+service_description Disk Usage
+host_name !eqmember1-SATA,!eqmember2-SAS
+check_command check_equallogic!public!diskusage!-w 85 -c 95
+process_perf_data       1
+}
+
+# Check Equallogic Raid Status
+define service{
+use prod-generic-service
+hostgroup_name wh-equallogic
+host_name !eqmember1-SATA,!eqmember2-SAS
+service_description Raid Status
+check_command check_equallogic!public!raid
+}
+
+# Check Equallogic ISCSI Connections
+define service{
+use prod-generic-service,srv-pnp
+hostgroup_name wh-equallogic
+host_name !eqmember1-SATA,!eqmember2-SAS
+service_description ISCSI Connections
+check_command check_equallogic!public!conn!-w 750 -c 800
+process_perf_data 1
+_graphiteprefix	monitoring.wh.storage
+}
+
+# Check Equallogic Power Supplies
+define service{
+use prod-generic-service
+hostgroup_name wh-equallogic
+host_name !eqmember1-SATA,!eqmember2-SAS
+service_description Power Supply
+check_command check_equallogic!public!ps
+}
+
+# Check Equallogic Fans
+define service{
+use prod-generic-service
+hostgroup_name wh-equallogic
+host_name !eqmember1-SATA,!eqmember2-SAS
+service_description Fans
+check_command check_equallogic!public!fan
+}
+
+# Check Equallogic Temperature
+define service{
+use prod-generic-service
+hostgroup_name wh-equallogic
+host_name !eqmember1-SATA,!eqmember2-SAS
+service_description Temperature
+check_command check_equallogic!public!temp
+}
+
+# Check Equallogic Volumes
+define service{
+use prod-generic-service,srv-pnp
+hostgroup_name wh-equallogic
+host_name !eqmember1-SATA,!eqmember2-SAS
+service_description Volumes
+check_command check_equallogic_volumes!public!volumes!-w 95 -c 98
+process_perf_data 1 
+}
+
+# Check Equallogic Disk Pool Usage
+define service{
+use prod-generic-service
+hostgroup_name wh-equallogic
+host_name !eqmember1-SATA,!eqmember2-SAS
+service_description Disk Pool Usage
+check_command check_equallogic!public!poolusage!-w 91 -c 95
+}
+
+# Check Equallogic Member Usage
+define service{
+use prod-generic-service,srv-pnp
+hostgroup_name wh-equallogic
+host_name !eqmember1-SATA,!eqmember2-SAS
+service_description Member Usage
+check_command check_equallogic!public!memberusage!-w 91 -c 95
+process_perf_data 1
+}
+
+# Check Equallogic Snapshot Usage
+define service{
+use prod-generic-service
+hostgroup_name wh-equallogic
+host_name !eqmember1-SATA,!eqmember2-SAS
+service_description Snapshot Usage
+check_command check_equallogic!public!snapshots!-c 98
+contact_groups dummy-contactgroup
+}
+
+
+

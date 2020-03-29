@@ -1,0 +1,659 @@
+#! /usr/bin/perl -w
+############################## check_allstorage   ##############
+# $Id: check_allstorage.pl,v 1.3 2008/02/27 15:18:28 jsellens Exp $
+# John Sellens (jsellens@syonex.com) made this as a derivative of:
+# ############################## check_snmp_storage ##############
+# # Version : 1.1
+# # Date :  Feb 16 2005
+# # Author  : Patrick Proy ( patrick at proy.org)
+# # Help : http://www.manubulon.com/nagios/
+# # Licence : GPL - http://www.fsf.org/licenses/gpl.txt
+# # TODO : better options in snmpv3
+# #################################################################
+#
+# check_allstorage adds the -a -n -z options, which lets you do things like
+#   check_allstorage.pl -a -n -C public -H host -m .
+# or
+#   check_allstorage.pl -a -n -C public -H host -m '/proc|/kern' -e
+# and get something that can generally be blindly applied against lots
+# of machines, and if the limits creep up and you want to reset them,
+# you can add the -z option which resets all the auto limits
+#   check_allstorage.pl -a -n -C public -H host -m '/proc|/kern' -e -z
+#
+# help : ./check_allstorage -h
+
+ 
+use strict;
+use Net::SNMP;
+use Getopt::Long;
+
+# Nagios specific
+
+use lib "/usr/local/nagios/libexec";
+use lib "nagios";
+use utils qw(%ERRORS $TIMEOUT);
+#my $TIMEOUT = 15;
+#my %ERRORS=('OK'=>0,'WARNING'=>1,'CRITICAL'=>2,'UNKNOWN'=>3,'DEPENDENT'=>4);
+
+# SNMP Datas
+my $storage_table= '1.3.6.1.2.1.25.2.3.1';
+my $index_table = '1.3.6.1.2.1.25.2.3.1.1';
+my $hrtypes_table = '1.3.6.1.2.1.25.2.3.1.2';
+my $descr_table = '1.3.6.1.2.1.25.2.3.1.3';
+my $size_table = '1.3.6.1.2.1.25.2.3.1.5.';
+my $used_table = '1.3.6.1.2.1.25.2.3.1.6.';
+my $alloc_units = '1.3.6.1.2.1.25.2.3.1.4.';
+my $hrtype = '1.3.6.1.2.1.25.2.3.1.2.';
+my $ABNORMAL = 0;	# should be a constant ...
+my $NORMAL = 1;		# should be a constant ...
+my %HRTYPES = (
+  '1.3.6.1.2.1.25.2.1.1' =>	$ABNORMAL,	# hrStorageOther
+  '1.3.6.1.2.1.25.2.1.2' =>	$NORMAL,	# hrStorageRam
+  '1.3.6.1.2.1.25.2.1.3' =>	$NORMAL,	# hrStorageVirtualMemory
+  '1.3.6.1.2.1.25.2.1.4' =>	$NORMAL,	# hrStorageFixedDisk
+  '1.3.6.1.2.1.25.2.1.5' =>	$ABNORMAL,	# hrStorageRemovableDisk
+  '1.3.6.1.2.1.25.2.1.6' =>	$ABNORMAL,	# hrStorageFloppyDisk
+  '1.3.6.1.2.1.25.2.1.7' =>	$ABNORMAL,	# hrStorageCompactDisk
+  '1.3.6.1.2.1.25.2.1.8' =>	$NORMAL,	# hrStorageRamDisk
+  '1.3.6.1.2.1.25.2.1.9' =>	$NORMAL,	# hrStorageFlashMemory
+  '1.3.6.1.2.1.25.2.1.10' =>	$ABNORMAL,	# hrStorageNetworkDisk
+);
+
+# Globals
+
+my $Name='check_allstorage';
+my $Version='1.1';
+
+my $Autolimitdir="/tmp/$Name";
+my %climits;			# where multiple auto critical limits go
+my %wlimits;			# where multiple auto warning limits go
+my $writelimits = 0;		# need to write out the limits file?
+
+my $o_host = 	undef; 		# hostname 
+my $o_community = undef; 	# community 
+if ( defined( $ENV{SNMPCOMM} ) ) {
+    $o_community = $ENV{SNMPCOMM};
+}
+my $o_port = 	161; 		# port
+my $o_descr = 	undef; 		# description filter 
+my $o_warn = 	undef; 		# warning limit 
+my $o_crit=	undef; 		# critical limit
+my $o_help=	undef; 		# wan't some help ?
+my $o_autolimit=undef; 		# use separate initialized limit files
+my $o_zaplimits=undef; 		# replace any existing auto limits
+my $o_normal=	undef; 		# do only normal devices ? i.e. no CD, floppy
+my $o_type=	undef;		# pl, pu, mbl, mbu 
+my @o_typeok=   ("pu","pl","bu","bl"); # valid values for o_type
+my $o_verb=	undef;		# verbose mode
+my $o_version=   undef;          # print version
+my $o_noreg=	undef;		# Do not use Regexp for name
+my $o_sum=	undef;		# add all storage before testing
+my $o_index=	undef;		# Parse index instead of description
+my $o_negate=	undef;		# Negate the regexp if set
+my $o_timeout=  5;            	# Default 5s Timeout
+if (defined($TIMEOUT)) {
+    $o_timeout = $TIMEOUT;	# more specific default from utils.pm
+}
+my $o_perf=	undef;		# Output performance data
+my $o_showok=	0;		# show OK results even if criticals or warnings
+# SNMP V3 specific
+my $o_login=	undef;		# snmp v3 login
+my $o_passwd=	undef;		# snmp v3 passwd
+
+# we should make these configurable ...
+my $c_minwarn=	80;		# minimum autocalculated warning percent
+my $c_maxwarn=	95;		# maximum autocalculated warning percent
+my $c_mincrit=	90;		# minimum autocalculated critical percent
+my $c_maxcrit=	97;		# maximum autocalculated critical percent
+
+# functions
+
+sub p_version { print "$Name version : $Version\n"; }
+
+sub print_usage {
+    print "Usage: $Name [-v] -H <host> -C <snmp_community> | (-l login -x passwd) [-p <port>] -m <name in desc_oid> -w <warn_level> -c <crit_level> [-t <timeout>] [-T pl|pu|bl|bu ] [-a] [-n] [-o] [-r] [-s] [-i] [-e] [-z]\n";
+}
+
+sub usage_error {
+  my ( $msg ) = @_;
+  if ( defined( $msg ) && $msg ne "" ) {
+    print "$Name:  $msg\n";
+  }
+  print_usage();
+  exit $ERRORS{"UNKNOWN"};
+}
+
+sub round ($$) {
+    sprintf "%.$_[1]f", $_[0];
+}
+
+# Get the alarm signal (just in case snmp timout screws up)
+$SIG{'ALRM'} = sub {
+     print ("ERROR: General time-out (Alarm signal)\n");
+     exit $ERRORS{"UNKNOWN"};
+};
+
+sub help {
+   print "\nSNMP Disk Monitor for Nagios version ",$Version,"\n";
+   print "(c)2004 to my cat Ratoune - Author : Patrick Proy\n\n";
+   print_usage();
+   print <<EOT;
+By default, plugin will monitor %used on drives :
+warn if %used > warn and critical if %used > crit
+-v, --verbose
+   print extra debugging information (and lists all storages)
+-h, --help
+   print this help message
+-H, --hostname=HOST
+   name or IP address of host to check
+-C, --community=COMMUNITY NAME
+   community name for the host's SNMP agent (implies SNMP v1)
+   defaults to SNMPCOMM from the environment
+-l, --login=LOGIN
+   Login for snmpv3 authentication (implies v3 protocol with MD5)
+-x, --passwd=PASSWD
+   Password for snmpv3 authentication
+-p, --port=PORT
+   SNMP port (Default 161)
+-m, --name=NAME
+   Name in description OID (can be mounpoints '/home' or 'Swap Space'...)
+   This is treated as a regexp : -m /var will match /var , /var/log, /opt/var ...
+   Test it before, because there are known bugs (ex : trailling /)
+   No trailing slash for mountpoints !
+-a, --autolimit
+   Use automated limit files in $Autolimitdir
+-z, --zaplimits
+   Ignore and replace any pre-defined limits in $Autolimitdir
+-n, --normal
+   Check only normal devices, i.e. not CD's, floppies, etc.
+-o, --ok
+   Show OK results, even if some are warning or critical
+-r, --noregexp
+   Do not use regexp to match NAME in description OID
+-s, --sum
+   Add all storages that match NAME (used space and total space)
+   THEN make the tests.
+-i, --index
+   Parse index table instead of description table to select storage
+-e, --exclude
+   Select all storages except the one(s) selected by -m
+-T, --type=TYPE
+   pl : calculate percent left
+   pu : calculate percent used (Default)
+   bl : calculate MegaBytes left
+   bu : calculate MegaBytes used
+-w, --warn=INTEGER
+   percent / MB of disk used to generate WARNING state
+   you can add the % sign 
+-c, --critical=INTEGER
+   percent / MB of disk used to generate CRITICAL state
+   you can add the % sign 
+-f, --perfparse
+   Perfparse compatible output
+-t, --timeout=INTEGER
+   timeout for SNMP in seconds (Default: 5)
+-V, --version
+   prints version number
+Note : 
+  with T=pu or T=bu : OK < warn < crit
+  with T=pl ot T=bl : crit < warn < OK
+  
+  If multiple storage are selected, the worse condition will be returned
+  i.e if one disk is critical, the return is critical
+ 
+  example : 
+  Browse storage list : <script> -C <community> -H <host> -m <anything> -w 1 -c 2 -v 
+  the -m option allows regexp in perl format : 
+  Test drive C,F,G,H,I on Windows 	: -m ^[CFGHI]:    
+  Test all mounts containing /var      	: -m /var
+  Test all mounts under /var      	: -m ^/var
+  Test only /var                 	: -m /var -r
+  Test all swap spaces			: -m ^Swap
+  Test all but swap spaces		: -m ^Swap -e
+
+EOT
+}
+
+sub verb { my $t=shift; print $t,"\n" if defined($o_verb) ; }
+
+sub check_options {
+    Getopt::Long::Configure ("bundling");
+    GetOptions(
+   	'v'	=> \$o_verb,		'verbose'	=> \$o_verb,
+        'h'     => \$o_help,    	'help'        	=> \$o_help,
+        'H:s'   => \$o_host,		'hostname:s'	=> \$o_host,
+        'p:i'   => \$o_port,   		'port:i'	=> \$o_port,
+        'C:s'   => \$o_community,	'community:s'	=> \$o_community,
+        'l:s'   => \$o_login,           'login:s'       => \$o_login,
+        'x:s'   => \$o_passwd,          'passwd:s'      => \$o_passwd,
+        'c:s'   => \$o_crit,    	'critical:s'	=> \$o_crit,
+        'w:s'   => \$o_warn,    	'warn:s'	=> \$o_warn,
+ 	't:i'   => \$o_timeout,       	'timeout:i'     => \$o_timeout,
+        'm:s'   => \$o_descr,		'name:s'	=> \$o_descr,
+	'T:s'	=> \$o_type,		'type:s'	=> \$o_type,
+        'a'     => \$o_autolimit,       'autolimit'     => \$o_autolimit,
+        'z'     => \$o_zaplimits,       'zaplimits'     => \$o_zaplimits,
+        'n'     => \$o_normal,          'normal'        => \$o_normal,
+        'o'     => \$o_showok,          'ok'            => \$o_showok,
+        'r'     => \$o_noreg,           'noregexp'      => \$o_noreg,
+        's'     => \$o_sum,           	'sum'      	=> \$o_sum,
+        'i'     => \$o_index,          	'index'      	=> \$o_index,
+        'e'     => \$o_negate,         	'exclude'    	=> \$o_negate,
+        'V'     => \$o_version,         'version'       => \$o_version,
+	'f'	=> \$o_perf,		'perfparse'	=> \$o_perf
+    );
+    if (defined($o_help) ) { help(); exit $ERRORS{"UNKNOWN"}};
+    if (defined($o_version) ) { p_version(); exit $ERRORS{"UNKNOWN"}};
+    # check snmp information
+    if ( !defined($o_community) && (!defined($o_login) || !defined($o_passwd)) )
+        { usage_error( "Missing snmp login info!" ); }
+    # Check types
+    if ( !defined($o_type) ) { $o_type="pu" ;}
+    if ( ! grep( /^$o_type$/ ,@o_typeok) ) { usage_error( "Invalid type for -T" ); }
+    # Check compulsory attributes
+    if ( ! defined($o_host) )
+	{ usage_error( "host name not specified" ); }
+    if ( ! defined($o_descr) )
+	{ usage_error( "-m option not specified" ); }
+    if ( !defined($o_autolimit) && defined($o_zaplimits) )
+	{ usage_error( "-z requires -a" ); }
+    if ( defined($o_autolimit) && defined($o_sum) )
+	{ usage_error( "-a and -s may not be used together" ); }
+    if ( defined($o_autolimit) && ( defined($o_warn) || defined($o_crit) ) )
+	{ usage_error( "-a may not be used with -c or -w" ); }
+    if ( !defined($o_autolimit) && ( !defined($o_warn) || !defined($o_crit) ) )
+	{ usage_error( "limits not specified -- -a or -w and -c" ); }
+    if ( defined($o_autolimit) && $o_type ne "pu" )
+	{ usage_error( "-a may only (currently) be used with type 'pu'" ); }
+    # Check for positive numbers
+    if (($o_warn < 0) || ($o_crit < 0))
+	{ usage_error( " warn and critical > 0" ); }
+    # check if warn or crit  in % and MB is tested
+    if (  ( ( $o_warn =~ /%/ ) || ($o_crit =~ /%/)) && ( ( $o_type eq 'bu' ) || ( $o_type eq 'bl' ) ) ) {
+	usage_error( "warning or critical cannot be in % when MB are tested" );
+    }
+    # Get rid of % sign
+    $o_warn =~ s/\%//; 
+    $o_crit =~ s/\%//;
+    # Check warning and critical values
+    if ( ( $o_type eq 'pu' ) || ( $o_type eq 'bu' )) {
+	if ($o_warn > $o_crit)
+	    { usage_error( " warn must be <= crit if type=".$o_type ); }
+    }
+    if ( ( $o_type eq 'pl' ) || ( $o_type eq 'bl' )) {
+	if ($o_warn < $o_crit)
+	    { usage_error( " warn must be >= crit if type=".$o_type ); }
+    }
+    if ( ($o_warn < 0 ) || ($o_crit < 0 ))
+	{ usage_error( "warn and crit must be >= 0" ); }
+    if ( ( $o_type eq 'pl' ) || ( $o_type eq 'pu' )) {
+        if ( ($o_warn > 100 ) || ($o_crit > 100 ))
+	  { usage_error( "warn and crit percent must be <= 100" ); }
+    } 
+}
+
+
+sub maximum {
+  my ( $a, $b ) = @_;
+  return( $a>$b ? $a : $b );
+}
+sub minimum {
+  my ( $a, $b ) = @_;
+  return( $a<$b ? $a : $b );
+}
+
+
+########## MAIN #######
+
+check_options();
+
+my $limitfile = "$Autolimitdir/${o_host}_${o_port}";
+if ( $o_autolimit ) {
+  # see if we have existing limits we can slurp in
+  verb( "checking for $limitfile" );
+  if ( -f $limitfile ) {
+    verb( "need to read limits from $limitfile" );
+    if ( open( IN, "<$limitfile" ) ) {
+      my $line;
+      while ( $line = <IN> ) {
+	chomp( $line );
+	# $line =~ /^(.*)!pu:(.*)!pu:(.*)$/;
+	# my ( $key, $warn, $crit ) = ( $1, $2, $3 );
+	if ( my ( $key, $warn, $crit ) = $line =~ /^(.*)!pu:(.*)!pu:(.*)$/ ) {
+	verb( "key '$key' warn '$warn' crit '$crit'" );
+	$wlimits{$key} = $warn;
+	$climits{$key} = $crit;
+	} else {
+	  warn( "$Name:  $limitfile on $line" );
+	}
+      }
+      close( IN );
+    } else {
+      warn( "Warning: could not read $limitfile: $!" );
+    }
+  } else {
+    $writelimits = 1;
+  }
+}
+
+# set timeout alarm
+verb("timeout defined : $o_timeout + 10");
+alarm ($o_timeout+10);
+
+# Connect to host
+my ($session,$error);
+if ( defined($o_login) && defined($o_passwd)) {
+  # SNMPv3 login
+  verb("SNMPv3 login");
+  ($session, $error) = Net::SNMP->session(
+      -hostname         => $o_host,
+      -version          => '3',
+      -username         => $o_login,
+      -authpassword     => $o_passwd,
+      -authprotocol     => 'md5',
+      -privpassword     => $o_passwd,
+      -timeout   	=> $o_timeout
+   );
+} else {
+  # SNMPV1 login
+  ($session, $error) = Net::SNMP->session(
+     -hostname  => $o_host,
+     -community => $o_community,
+     -port      => $o_port,
+     -timeout   => $o_timeout
+  );
+}
+
+if (!defined($session)) {
+   printf("ERROR: %s.\n", $error);
+   exit $ERRORS{"UNKNOWN"};
+}
+
+my $resultat=undef;
+if (defined ($o_index)){
+  $resultat = $session->get_table( 
+	Baseoid => $index_table 
+  );
+} else {
+  $resultat = $session->get_table( 
+	Baseoid => $descr_table 
+  );
+}
+
+if (!defined($resultat)) {
+   printf("ERROR: Description/Index table : %s.\n", $session->error);
+   $session->close;
+   exit $ERRORS{"UNKNOWN"};
+}
+
+# get hrStorageTypes if we need them
+my $hrtypes=undef;
+if (defined ($o_normal)){
+  $hrtypes = $session->get_table( 
+	Baseoid => $hrtypes_table 
+  );
+  if (!defined($hrtypes)) {
+     printf("ERROR: hrTypes table : %s.\n", $session->error);
+     $session->close;
+     exit $ERRORS{"UNKNOWN"};
+  }
+}
+
+my @tindex = undef;
+my @oids = undef;
+my @descr = undef;
+my $num_int = 0;
+my $count_oid = 0;
+my $test = undef;
+my $perf_out=	undef;
+# Select storage by regexp of exact match
+# and put the oid to query in an array
+
+verb("Filter : $o_descr");
+
+foreach my $key ( keys %$resultat) {
+   verb("OID : $key, Desc : $$resultat{$key}");
+   # test by regexp or exact match / include or exclude
+   if (defined($o_negate)) {
+     $test = defined($o_noreg)
+                ? $$resultat{$key} ne $o_descr
+                : $$resultat{$key} !~ /$o_descr/;
+   } else {
+     $test = defined($o_noreg)
+                ? $$resultat{$key} eq $o_descr
+                : $$resultat{$key} =~ /$o_descr/;
+   }  
+  if ($test) {
+     # get the index number of the interface
+     my @oid_list = split (/\./,$key);
+     $tindex[$num_int] = pop (@oid_list);
+     if ( $o_normal ) {	# should we ignore this device?
+       $test = $HRTYPES{ $$hrtypes{$hrtype . $tindex[$num_int]} };
+       verb( "hrtype is " . $$hrtypes{$hrtype . $tindex[$num_int]}
+	  . ( $test ? " (normal - included)" : " (abnormal - ignored)" ) );
+     }
+     if ( $test ) {	# i.e. we haven't excluded it as "abnormal"
+       # get the full description
+       $descr[$num_int]=$$resultat{$key};
+       # put the oid in an array
+       $oids[$count_oid++]=$size_table . $tindex[$num_int];
+       $oids[$count_oid++]=$used_table . $tindex[$num_int];
+       $oids[$count_oid++]=$alloc_units . $tindex[$num_int];
+
+       verb("Name : $descr[$num_int], Index : $tindex[$num_int]");
+       $num_int++;
+     }
+  }
+}
+verb("storages selected : $num_int");
+if ( $num_int == 0 ) { print "Unknown storage : $o_descr : ERROR\n" ; exit $ERRORS{"UNKNOWN"};}
+
+my $result = $session->get_request(
+   Varbindlist => \@oids
+);
+
+if (!defined($result)) { printf("ERROR: Size table :%s.\n", $session->error); $session->close;
+   exit $ERRORS{"UNKNOWN"};
+}
+
+$session->close;
+
+# Only a few ms left...
+alarm(0);
+
+if ( $o_autolimit ) {
+  my $i;
+  # should we ignore and replace any existing limits?
+  if ( $o_zaplimits ) {
+    undef %climits;
+    undef %wlimits;
+  }
+  # do we need to recalculate any limits?  e.g. Have any new filesystems?
+  for ($i=0;$i<$num_int;$i++) {
+    # We assume $o_type = pu here because I'm too lazy to put all the
+    # code in to make it handle all the possible variations.  Though,
+    # if we only record pu limits, we could always translate those numbers
+    # into the current preferred type.  But again, I'm too lazy (for now).
+    my $pu = 0;
+    my $name = $descr[$i];
+    if ( $$result{$used_table . $tindex[$i]} != 0 ) {
+      $pu = $$result{$used_table . $tindex[$i]}*100
+	/ $$result{$size_table . $tindex[$i]};
+    } 
+    # if one is missing, recalculate both, so we are sure they are consistent
+    if ( !defined( $wlimits{$name} )
+      || !defined( $climits{$name} ) ) {
+      verb( "need to set limits for $name" );
+      # critical is 3/4's of the way from here to 100%
+      $climits{$name} = minimum( $c_maxcrit, int( (300 + $pu) / 4 + 0.5 ) );
+      $climits{$name} = maximum( $c_mincrit, $climits{$name} );
+      # warning is halfway from here to 100%, and less than critical
+      $wlimits{$name} = minimum( $climits{$name} - 1,
+	minimum( $c_maxwarn, int( (100 + $pu) / 2 + 0.5 ) ) );
+      $wlimits{$name} = maximum( $c_minwarn, $wlimits{$name} );
+      $writelimits = 1;
+    }
+  }
+  if ( $writelimits ) {
+    verb( "need to write out new $limitfile" );
+    if ( ! -d $Autolimitdir ) {
+	mkdir( $Autolimitdir );
+    }
+    if ( open( OUT, ">$limitfile" ) ) {
+      foreach my $key ( keys %wlimits ) {
+	# we hope we never have a device with ! in its name
+	printf OUT "%s!pu:%d!pu:%d\n", $key, $wlimits{$key}, $climits{$key};
+      }
+      close( OUT );
+    } else {
+      warn( "Warning: could not write $limitfile: $!" );
+    }
+  }
+}
+
+
+# Sum everything if -s and more than one storage
+if ( defined ($o_sum) && ($num_int > 1) ) {
+  verb("Adding all entries into one");
+  $$result{$size_table . $tindex[0]} *= $$result{$alloc_units . $tindex[0]};
+  $$result{$used_table . $tindex[0]} *= $$result{$alloc_units . $tindex[0]};
+  $$result{$alloc_units . $tindex[0]} = 1;
+  for (my $i=1;$i<$num_int;$i++) {
+    $$result{$size_table . $tindex[0]} += ($$result{$size_table . $tindex[$i]} 
+					  * $$result{$alloc_units . $tindex[$i]}); 
+    $$result{$used_table . $tindex[0]} += ($$result{$used_table . $tindex[$i]}
+					  * $$result{$alloc_units . $tindex[$i]});
+  }
+  $num_int=1;
+  $descr[0]="Sum of all $o_descr";
+}
+
+my $i=undef;
+# we store the messages away, so we can print criticals first, so they
+# show up at the start of the message (especially for a pager message)
+my @okmsgs = ();
+my @critmsgs = ();
+my @warnmsgs = ();
+my $warn_state=0;
+my $crit_state=0;
+my ($p_warn,$p_crit,$msg);
+for ($i=0;$i<$num_int;$i++) {
+  # if we have per-target limits use them - if -a, this should be true
+  my $crit = defined($climits{$descr[$i]})
+    ? $climits{$descr[$i]} : $o_crit;
+  my $warn = defined($wlimits{$descr[$i]})
+    ? $wlimits{$descr[$i]} : $o_warn;
+  verb("Size :  $$result{$size_table . $tindex[$i]}");
+  verb("Used : $$result{$used_table . $tindex[$i]}");
+  verb("Alloc : $$result{$alloc_units . $tindex[$i]}");
+  my $to = $$result{$size_table . $tindex[$i]} * $$result{$alloc_units . $tindex[$i]} / 1024**2;
+  my $pu=undef;
+  if ( $$result{$used_table . $tindex[$i]} != 0 ) {
+    $pu = $$result{$used_table . $tindex[$i]}*100 / $$result{$size_table . $tindex[$i]};
+  }else {
+    $pu=0;
+  } 
+  my $bu = $$result{$used_table . $tindex[$i]} *  $$result{$alloc_units . $tindex[$i]} / 1024**2;
+  my $pl = 100 - $pu;
+  my $bl = ($$result{$size_table . $tindex[$i]}- $$result{$used_table . $tindex[$i]}) * $$result{$alloc_units . $tindex[$i]} / 1024**2;
+  # add a ',' if some data exists in $perf_out
+  $perf_out .= " " if (defined ($perf_out)) ;
+  ##### Ouputs 
+  ##### TODO : subs "," with something
+  if ($o_type eq "pu") {
+    $msg = sprintf("%s %.0f%% (%.0f/%.0fMB)",$descr[$i],$pu,$bu,$to);
+    $p_warn=$warn*$to/100;$p_crit=$crit*$to/100; 
+    if ($pu >= $crit) {
+      $crit_state=1;
+      push( @critmsgs, $msg . " >$crit" );
+    } elsif ($pu >= $warn) {
+      $warn_state=1;
+      push( @warnmsgs, $msg . " >$warn" );
+    } else {
+      push( @okmsgs, $msg . " <$warn" );
+    }
+  }
+  
+  if ($o_type eq 'bu') {
+    $msg=sprintf("%s: %.0f MB used/%.0f MB (%.0f%%)",$descr[$i],$bu,$to,$pu);
+    $p_warn=$warn;$p_crit=$crit;
+    if ($bu >= $crit) {
+      $crit_state=1;
+      push( @critmsgs, $msg . " >$crit" );
+    } elsif ($bu >= $warn) {
+      $warn_state=1;
+      push( @warnmsgs, $msg . " >$warn" );
+    } else {
+      push( @okmsgs, $msg . " <$warn" );
+    }
+  }
+ 
+  if ($o_type eq 'bl') {
+    $msg=Sprintf("%s: %.0f MB left/%.0f MB (%.0f%%)",$descr[$i],$bl,$to,$pl);
+    $p_warn=$to-$warn;$p_crit=$to-$crit;
+    if ($bl <= $crit) {
+      $crit_state=1;
+      push( @critmsgs, $msg . " <$crit" );
+    } elsif ($bl <= $warn) {
+      $warn_state=1;
+      push( @warnmsgs, $msg . " <$warn" );
+    } else {
+      push( @okmsgs, $msg . " >$warn" );
+    }
+  }
+  
+  if ($o_type eq 'pl') {
+    $msg=sprintf ("%s: %.0f %%left (%.0fMB/%.0fMB)",$descr[$i],$pl,$bl,$to);
+    $p_warn=(100-$warn)*$to/100;$p_crit=(100-$crit)*$to/100;
+    if ($pl <= $crit) {
+      $crit_state=1;
+      push( @critmsgs, $msg . " <$crit" );
+    } elsif ($pl <= $warn) {
+      $warn_state=1;
+      push( @warnmsgs, $msg . " <$warn" );
+    } else {
+      push( @okmsgs, $msg . " >$warn" );
+    }
+  }
+  $descr[$i] =~ s/'/_/g; 
+  $perf_out .= "'".$descr[$i] . "'=" . round($bu,0) . "MB;" . round($p_warn,0) 
+	       . ";" . round($p_crit,0) . ";0;" . round($to,0);
+}
+if ( @critmsgs > 0 ) {
+  print( "CRITICAL: " );
+  while ( @critmsgs > 0 ) {
+    print( shift( @critmsgs ) . "; " );
+  }
+}
+if ( @warnmsgs > 0 ) {
+  print( "WARNING: " );
+  while ( @warnmsgs > 0 ) {
+    print( shift( @warnmsgs ) . "; " );
+  }
+}
+if ( @okmsgs > 0 ) {
+  print( "OK: " );
+  if ( $o_showok || ( !$crit_state && !$warn_state ) ) {
+    while ( @okmsgs > 0 ) {
+      print( shift( @okmsgs ) . "; " );
+    }
+  } else {
+    print( scalar( @okmsgs ) . " devices" );
+  }
+}
+
+verb ("Perf data : $perf_out");
+
+if ( defined($o_perf) ) {
+  print( " | $perf_out" );
+}
+print( "\n" );
+
+if ( $crit_state == 1) {
+     exit $ERRORS{"CRITICAL"};
+    }
+if ( $warn_state == 1) {
+     exit $ERRORS{"WARNING"};
+   }
+exit $ERRORS{"OK"};
+

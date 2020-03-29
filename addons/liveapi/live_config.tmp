@@ -1,0 +1,5 @@
+<?php
+
+$conf['socketPath'] = '/usr/local/nagios/var/rw/live';
+
+?>

@@ -1,0 +1,6 @@
+#!/bin/sh
+
+now=`date +%s`
+commandfile='/usr/local/nagios/var/rw/nagios.cmd'
+
+/usr/bin/printf "[%lu] RESTART_PROGRAM\n" $now > $commandfile

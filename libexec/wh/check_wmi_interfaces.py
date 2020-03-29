@@ -1,0 +1,188 @@
+#!/usr/bin/python
+import os
+import commands
+import sys
+from optparse import OptionParser
+import csv
+
+parser = OptionParser()
+parser.add_option("-H", "--host", dest="host",
+                  help="Hostname/FQDN or IP address")
+parser.add_option("-p", "--port", type="int", dest="port",default="1248",
+                  help="Port that nc_net or nsclient++ is running on (1248)")
+parser.add_option("-w", "--warning", dest="warning", 
+                  help="Warning Threshold (percentage of interface speed default to 70 see also -r/--raw)")
+parser.add_option("-c", "--critical", dest="critical", 
+                  help="Critical Threshold (percentage of interface speed default to 90 see also -r/--raw)")
+parser.add_option("-P", "--prefix", dest="prefix", default="None",
+                  help="Prefix to Be used Kilo/K, Mega/M, Giga/G, if none specified  bits/bytes will be used")
+parser.add_option("-S", "--special", action="store_true", dest="special", default=False,
+                  help="Include special interfaces Teredo IPv6 tunnel and isatap")
+parser.add_option("-D", "--disconnected", action="store_true", dest="disconnected", default=False,
+                  help="Include disconnected interfaces (interface speed = 0)")
+parser.add_option("-r", "--raw", action="store_true", dest="raw", default=False,
+                  help="Use raw values for Warning and Critical thresholds (affected by prefix used i.e.  -r -w 1000 -c 2000 -P kilo  will set Warning threshold to 1000 Kilobits/sec and Critical threshold to 2000 Kilobits/sec) ")
+parser.add_option("-R", "--rawperfdata", action="store_true", dest="rawperf", default=False,
+                  help="Use raw values for Performance Data thresholds (Can be used in combination with -r i.e. -r -R )")
+(options, args) = parser.parse_args()
+
+host=options.host
+port=str(options.port)
+special=str(options.special)
+disconnected=str(options.disconnected)
+prefix=str(options.prefix)
+raw=options.raw
+rawperf=options.rawperf
+if options.warning:
+	warning=float(options.warning)
+else:
+	if raw:
+		print "You have not specified a warning threshold but have specified using raw values. Please add -w <VALUE> to the command"
+		exit(3)
+	else:
+		warning=70
+if options.critical:
+	critical=float(options.critical)
+else:
+	if raw:
+		print "You have not specified a critical threshold but have specified using raw values. Please add -c <VALUE> to the command"
+		exit(3)
+	else:
+		critical=90
+if prefix is "None":
+	divisor=1
+	prefixOutput=""
+elif prefix.upper()[0] is "K":
+	divisor=1000
+	prefixOutput=prefix.upper()[0]
+elif prefix.upper()[0] is "M":
+	divisor=1000**2
+	prefixOutput=prefix.upper()[0]
+elif prefix.upper()[0] is "G":
+	divisor=1000**3
+	prefixOutput=prefix.upper()[0]
+else:
+	print "Sorry you have entered "+prefix+", which is not a valid prefix, please use either Kilo/K, Mega/M, Giga/G"
+	exit(3)
+
+
+
+listInterfaces="/usr/local/nagios/libexec/check_nt -H "+host+" -p "+port+" -v INSTANCES -l \"Network Interface\""
+status, output = commands.getstatusoutput(listInterfaces)
+interfaces=output[21:].split(',')
+interfaces.sort()
+interfaceID=int(1)
+outputlist=[]
+#Stripping builtin IPv6 tunneling interface Teredo & isatap interfaces if Special is not enabled
+if special == "False":
+	interfaces = [tup for tup in interfaces if not "Teredo" in tup]
+	interfaces = [tup for tup in interfaces if not "isatap" in tup]
+for i in interfaces:
+	getInterfaceSpeed="/usr/local/nagios/libexec/check_nt -H "+host+" -p "+port+" -v COUNTER -l  \"\\\\Network Interface("+i+")\\\\Current Bandwidth\""
+	getInterfaceRead="/usr/local/nagios/libexec/check_nt -H "+host+" -p "+port+" -v COUNTER -l  \"\\\\Network Interface("+i+")\\\\Bytes Received/sec\""
+	getInterfaceSent="/usr/local/nagios/libexec/check_nt -H "+host+" -p "+port+" -v COUNTER -l  \"\\\\Network Interface("+i+")\\\\Bytes Sent/sec\""
+	speedstatus, speed = commands.getstatusoutput(getInterfaceSpeed)
+	calcSpeed=float(speed)/divisor
+	if raw:
+		if int(calcSpeed)==0: #can't have devide by zero in the case where speed=0
+			warningThreshold=0
+			criticalThreshold=0
+			warningThresholdRaw=warning/divisor
+			criticalThresholdRaw=critical/divisor
+		else: #even though using RAW, calculate threshold as percentage of interface throughput so logic below is significantly simpler
+			warningThreshold=(warning/calcSpeed)*100
+			criticalThreshold=(critical/calcSpeed)*100
+			warningThresholdRaw=warning/divisor
+			criticalThresholdRaw=critical/divisor
+	else:
+		warningThreshold=float(warning)
+		criticalThreshold=float(critical)
+		warningThresholdRaw=(warning/100)*calcSpeed
+		criticalThresholdRaw=(critical/100)*calcSpeed
+	if disconnected == "True":
+		readstatus, actualReadBytes = commands.getstatusoutput(getInterfaceRead)
+		sendstatus, actualSendBytes = commands.getstatusoutput(getInterfaceSent)
+		readBits=float(actualReadBytes)*8/divisor
+		sendBits=float(actualSendBytes)*8/divisor
+		if calcSpeed>0:
+			readPct=(readBits/calcSpeed)*100
+			sendPct=(sendBits/calcSpeed)*100
+	 	else:
+			readPct=0 #Can't div by zero but interface can't send traffic whilst disconnected either.
+			sendPct=0
+		#print str(interfaceID)+": "+i+": Speed: "+str(calcSpeed)+prefixOutput+"b/s "+str(readBits)+prefixOutput+"b/s rx, "+str(sendBits)+prefixOutput+"b/s tx"
+		if (readPct > criticalThreshold) or(sendPct > criticalThreshold): #Set status to 2 - critical
+			outputlist.append([2,str(interfaceID),str(i),str(readPct),str(readBits),str(sendPct),str(sendBits),str(warningThresholdRaw),str(criticalThresholdRaw)])
+		elif (readPct > warningThreshold) or(sendPct > warningThreshold): #Set status to 1 - warning
+			outputlist.append([1,str(interfaceID),str(i),str(readPct),str(readBits),str(sendPct),str(sendBits),str(warningThresholdRaw),str(criticalThresholdRaw)])
+		elif (readPct <= warningThreshold) or(sendPct <= warningThreshold): #Set status to 0 - OK
+			outputlist.append([0,str(interfaceID),str(i),str(readPct),str(readBits),str(sendPct),str(sendBits),str(warningThresholdRaw),str(criticalThresholdRaw)])
+		else: #Set status to 3 - you've managed to do something weird
+			outputlist.append([3,str(interfaceID),str(i),str(readPct),str(readBits),str(sendPct),str(sendBits),str(warningThresholdRaw),str(criticalThresholdRaw)])
+	
+	elif speed > "0": #if Speed is 0 interface is classed as disconnected so where speed > 0 interface is active. This may only be the case for autonegotiation.
+		readstatus, actualReadBytes = commands.getstatusoutput(getInterfaceRead)
+		sendstatus, actualSendBytes = commands.getstatusoutput(getInterfaceSent)
+		readBits=float(actualReadBytes)*8/divisor
+		sendBits=float(actualSendBytes)*8/divisor
+		readPct=(readBits/calcSpeed)*100
+		sendPct=(sendBits/calcSpeed)*100
+		#print str(interfaceID)+": "+i+": Speed: "+str(calcSpeed)+prefixOutput+"b/s "+str(readBits)+prefixOutput+"b/s rx, "+str(sendBits)+prefixOutput+"b/s tx"
+		if (readPct > criticalThreshold) or(sendPct > criticalThreshold):
+			outputlist.append([2,str(interfaceID),str(i),str(readPct),str(readBits),str(sendPct),str(sendBits),str(warningThresholdRaw),str(criticalThresholdRaw)])
+		elif (readPct > warningThreshold) or(sendPct > warningThreshold):
+			outputlist.append([1,str(interfaceID),str(i),str(readPct),str(readBits),str(sendPct),str(sendBits),str(warningThresholdRaw),str(criticalThresholdRaw)])
+		elif (readPct < warningThreshold) or(sendPct < warningThreshold):
+			outputlist.append([0,str(interfaceID),str(i),str(readPct),str(readBits),str(sendPct),str(sendBits),str(warningThresholdRaw),str(criticalThresholdRaw)])
+		else:
+			outputlist.append([3,str(interfaceID),str(i),str(readPct),str(readBits),str(sendPct),str(sendBits),str(warningThresholdRaw),str(criticalThresholdRaw)])
+	interfaceID+=1
+#print outputlist
+outputlistindex=0
+statusCode=0
+for objects in outputlist:
+	#print outputlistindex
+	interface=outputlist[outputlistindex][1]
+	status=outputlist[outputlistindex][0]
+	if status>0:
+		statusCode=status
+	outputlistindex=+1
+if statusCode > 0:
+	if statusCode==1:
+		statusType="WARNING"
+	elif statusCode==2:
+		statusType="CRITICAL"
+	elif statusCode==3:
+		statusType="UNKNOWN"
+	pluginoutput="Interface "+interface+" "+statusType+"|"
+else:
+	pluginoutput="All Interfaces OK|"
+#print pluginoutput
+#print "----------------SEPARATOR-----------------"
+objectindex=0
+if rawperf:
+	for objects in outputlist:
+		interfaceID=str(outputlist[objectindex][1])
+		valueread=str(outputlist[objectindex][4])
+		valuesend=str(outputlist[objectindex][6])
+		warning=str(outputlist[objectindex][7])
+		critical=str(outputlist[objectindex][8])
+		if prefix=="None":
+			prefixLetter=""
+		else:
+			prefixLetter=prefix
+		RawPerfdata="\'Interface "+interfaceID+" RX\'="+valueread+prefixLetter+"B;"+warning+";"+critical+" "+"\'Interface "+interfaceID+" TX\'="+valuesend+prefixLetter+"B;"+warning+";"+critical
+		pluginoutput=pluginoutput+RawPerfdata
+		objectindex=objectindex+1
+else:
+	for objects in outputlist:
+		interfaceID=str(outputlist[objectindex][1])
+		valueread=str(outputlist[objectindex][3])
+		valuesend=str(outputlist[objectindex][5])
+		warning=str(warningThreshold)
+		critical=str(criticalThreshold)
+		RawPerfdata="\'Interface "+interfaceID+" RX\'="+valueread+"%;"+warning+";"+critical+" "+"\'Interface "+interfaceID+" TX\'="+valuesend+"%;"+warning+";"+critical
+		pluginoutput=pluginoutput+RawPerfdata
+		objectindex=objectindex+1
+print pluginoutput
+exit(statusCode)

@@ -1,0 +1,6 @@
+source 'http://rubygems.org'
+gem 'curb'
+gem 'active_support'
+gem 'i18n'
+gem 'pry'
+#gem 'awesome_print'

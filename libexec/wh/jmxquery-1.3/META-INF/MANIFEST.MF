@@ -1,0 +1,7 @@
+Manifest-Version: 1.0
+Built-By: perhu
+Build-Jdk: 1.6.0_33
+Created-By: Apache Maven
+Main-Class: jmxquery.JMXQuery
+Archiver-Version: Plexus Archiver
+

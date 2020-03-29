@@ -1,0 +1,44 @@
+#!/bin/sh
+
+WARN=$1
+CRIT=$2
+
+OUTPUT=$(/usr/sbin/postqueue -p | tail -n-1 | awk '{print $2,$3,$5}')
+
+REQUESTS=$(echo $OUTPUT | awk '{print $3}')
+SIZE=$(echo $OUTPUT | awk '{print $1}')
+UNIT=$(echo $OUTPUT | awk '{print $2}')
+OUTPUT="$REQUESTS in the queue, $SIZE $UNIT |"
+PERFDATA="requests=$REQUESTS size=$SIZE"
+
+echo "$UNIT" | grep -i kb > /dev/null
+if [ $? -eq 0 ]
+then
+        PERFUNIT=KB
+else
+        PERFUNIT=MB
+fi
+
+PERFDATA="requests=$REQUESTS;$WARN;$CRIT;0; size=$SIZE$PERFUNIT;$WARN;$CRIT;0;"
+
+
+if [ $REQUESTS -ge $CRIT ]
+then
+        RESPONSE="CRITICAL: "
+        CODE=2
+elif [ $REQUESTS -ge $WARN ]
+then
+        RESPONSE="WARNING: "
+        CODE=1
+elif [ -z $REQUESTS ]
+then
+        RESPONSE="UNKNOWN: "
+        CODE=3
+else
+        RESPONSE="OK: "
+        CODE=0
+fi
+
+echo "$RESPONSE$OUTPUT $PERFDATA"
+exit $CODE
+
